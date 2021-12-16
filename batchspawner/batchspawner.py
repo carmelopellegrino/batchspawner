@@ -925,7 +925,6 @@ Queue
     async def move_certs(self, paths):
         """Make a copy of the SSL certificates and key JupyterHub creates for
         each user when internal_ssl=True"""
-        mask = os.umask()
         try:
             username = self.user.name
             entry = pwd.getpwnam(username)
@@ -940,7 +939,7 @@ Queue
                     'certfile': home + '/notebook.pem'
             }
 
-            os.umask(0o077)
+            mask = os.umask(0o077)
 
             for key in paths:
                 nb_path = nb_paths[key]

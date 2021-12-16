@@ -22,6 +22,8 @@ import os
 import re
 import sys
 
+from shutil import copyfile
+
 import xml.etree.ElementTree as ET
 
 from enum import Enum
@@ -920,6 +922,34 @@ Queue
             .replace("'", "''")
         )
 
+    async def move_certs(self, paths):
+        """Make a copy of the SSL certificates and key JupyterHub creates for
+        each user when internal_ssl=True"""
+        mask = os.umask()
+        try:
+            username = self.user.name
+            entry = pwd.getpwnam(username)
+
+            home = entry.pw_dir
+            uid = entry.pw_uid
+            gid = entry.pw_gid
+
+            nb_paths = {
+                    'cafile': home + '/ca.pem',
+                    'keyfile': home + '/notebook.key',
+                    'certfile': home + '/notebook.pem'
+            }
+
+            os.umask(0o077)
+
+            for key in paths:
+                nb_path = nb_paths[key]
+                copyfile(paths[key], nb_path)
+                os.chown(nb_path, uid, gid)
+
+            return nb_paths
+        finally:
+            os.umask(mask)
 
 class LsfSpawner(BatchSpawnerBase):
     """A Spawner that uses IBM's Platform Load Sharing Facility (LSF) to launch notebooks."""

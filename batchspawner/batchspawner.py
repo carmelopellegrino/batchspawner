@@ -23,6 +23,7 @@ import re
 import sys
 
 from shutil import copyfile
+from pathlib import Path
 
 import xml.etree.ElementTree as ET
 
@@ -929,14 +930,18 @@ Queue
             username = self.user.name
             entry = pwd.getpwnam(username)
 
-            home = entry.pw_dir
+            home = Path(entry.pw_dir)
             uid = entry.pw_uid
             gid = entry.pw_gid
 
+            home.mkdir(exist_ok=True, parents=True)
+            os.chown(home, uid, gid)
+            home.chmod(0o700)
+
             nb_paths = {
-                    'cafile': home + '/ca.pem',
-                    'keyfile': home + '/notebook.key',
-                    'certfile': home + '/notebook.pem'
+                    'cafile': home / 'ca.pem',
+                    'keyfile': home / 'notebook.key',
+                    'certfile': home / 'notebook.pem'
             }
 
             mask = os.umask(0o077)

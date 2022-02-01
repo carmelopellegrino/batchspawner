@@ -988,6 +988,19 @@ Queue
         options = {}
         return options
 
+    def get_args(self):
+        """Return arguments to pass to the notebook server"""
+        argv = super().get_args()
+        if self.user_options.get('argv'):
+            argv.extend(self.user_options['argv'])
+        return argv
+
+    def get_env(self):
+        env = super().get_env()
+        if self.user_options.get('env'):
+            env.update(self.user_options['env'])
+        return env
+
 class LsfSpawner(BatchSpawnerBase):
     """A Spawner that uses IBM's Platform Load Sharing Facility (LSF) to launch notebooks."""
 

@@ -969,7 +969,7 @@ Queue
         return """
         <div class="form-group">
             <label for=user_config">Extra notebook configuration parameters</label>
-            <textarea name=user_config" class="form-control"
+            <textarea name="user_config" class="form-control"
                 placeholder="Content of ~/.jupyter/jupyter_notebook_config.py">{user_config}</textarea>
         </div>
         """.format(user_config=user_config)

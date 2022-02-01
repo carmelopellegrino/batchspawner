@@ -955,6 +955,41 @@ Queue
         finally:
             os.umask(mask)
 
+    def _options_form_default(self):
+        user_config = ''
+        try:
+            username = self.user.name
+            entry = pwd.getpwnam(username)
+            home = Path(entry.pw_dir)
+            with open(home / 'jupyter_notebook_config.py') as user_config_file:
+                user_config = user_config_file.read()
+        except:
+            pass
+
+        return """
+        <div class="form-group">
+            <label for=user_config">Extra notebook configuration parameters</label>
+            <textarea name=user_config" class="form-control"
+                placeholder="Content of ~/.jupyter/jupyter_notebook_config.py">
+                {user_config}
+            </textarea>
+        </div>
+        """.format(user_config=user_config)
+
+    def options_from_form(self, formdata):
+        user_config = formdata.get('user_config', [''])[0]
+        try:
+            username = self.user.name
+            entry = pwd.getpwnam(username)
+            home = Path(entry.pw_dir)
+            with open(home / 'jupyter_notebook_config.py', 'w') as user_config_file:
+                user_config_file.write(user_config)
+        except:
+            pass
+
+        options = {}
+        return options
+
 class LsfSpawner(BatchSpawnerBase):
     """A Spawner that uses IBM's Platform Load Sharing Facility (LSF) to launch notebooks."""
 

@@ -16,9 +16,8 @@ Common attributes of batch submission / resource manager environments will inclu
   * job names instead of PIDs
 """
 import asyncio
-from async_generator import async_generator, yield_, yield_from_
-import pwd
 import os
+import pwd
 import re
 import sys
 
@@ -26,23 +25,11 @@ from shutil import copyfile
 from pathlib import Path
 
 import xml.etree.ElementTree as ET
-
 from enum import Enum
 
 from jinja2 import Template
-
-from tornado import gen
-from tornado.process import Subprocess
-from subprocess import CalledProcessError
-from tornado.iostream import StreamClosedError
-
-from jupyterhub.spawner import Spawner
-from jupyterhub.traitlets import Command
-from traitlets import Integer, Unicode, Float, Dict, default
-
-from jupyterhub.utils import random_port
-from jupyterhub.spawner import set_user_setuid
-import jupyterhub
+from jupyterhub.spawner import Spawner, set_user_setuid
+from traitlets import Dict, Float, Integer, Unicode, default
 
 
 def format_template(template, *args, **kwargs):
@@ -180,7 +167,7 @@ class BatchSpawnerBase(Spawner):
         help="Extra environment variables which should be configured, "
         "added to the defaults in keepvars, "
         "comma separated list.",
-    )
+    ).tag(config=True)
 
     batch_script = Unicode(
         "",
@@ -253,9 +240,7 @@ class BatchSpawnerBase(Spawner):
                 self.log.error(out)
                 self.log.error("Stderr:")
                 self.log.error(eout)
-                raise RuntimeError(
-                    "{} exit status {}: {}".format(cmd, proc.returncode, eout)
-                )
+                raise RuntimeError(f"{cmd} exit status {proc.returncode}: {eout}")
             except asyncio.TimeoutError:
                 self.log.error(
                     "Encountered timeout trying to clean up command, process probably killed already: %s"
@@ -298,14 +283,16 @@ class BatchSpawnerBase(Spawner):
         if hasattr(self, "user_options"):
             subvars.update(self.user_options)
         script = await self._get_batch_script(**subvars)
-        self.log.info("Spawner submitting job using " + cmd)
-        self.log.info("Spawner submitted script:\n" + script)
+        self.log.info("Spawner script options: %s", subvars)
+        self.log.info("Spawner submitting command: %s", cmd)
+        self.log.debug("Spawner submitting script:\n%s", script)
+        self.log.debug("Spawner submitting environment: %s", self.get_env())
         out = await self.run_command(cmd, input=script, env=self.get_env())
         try:
-            self.log.info("Job submitted. cmd: " + cmd + " output: " + out)
+            self.log.info("Job submitted. output: %s", out)
             self.job_id = self.parse_job_id(out)
         except:
-            self.log.error("Job submission failed with exit code " + out)
+            self.log.error("Job submission failed. exit code: %s", out)
             self.job_id = ""
         return self.job_id
 
@@ -335,7 +322,7 @@ class BatchSpawnerBase(Spawner):
         except RuntimeError as e:
             # e.args[0] is stderr from the process
             self.job_status = e.args[0]
-        except Exception as e:
+        except Exception:
             self.log.error("Error querying job " + self.job_id)
             self.job_status = ""
 
@@ -367,13 +354,13 @@ class BatchSpawnerBase(Spawner):
 
     def load_state(self, state):
         """load job_id from state"""
-        super(BatchSpawnerBase, self).load_state(state)
+        super().load_state(state)
         self.job_id = state.get("job_id", "")
         self.job_status = state.get("job_status", "")
 
     def get_state(self):
         """add job_id to state"""
-        state = super(BatchSpawnerBase, self).get_state()
+        state = super().get_state()
         if self.job_id:
             state["job_id"] = self.job_id
         if self.job_status:
@@ -382,7 +369,7 @@ class BatchSpawnerBase(Spawner):
 
     def clear_state(self):
         """clear job_id state"""
-        super(BatchSpawnerBase, self).clear_state()
+        super().clear_state()
         self.job_id = ""
         self.job_status = ""
 
@@ -425,10 +412,10 @@ class BatchSpawnerBase(Spawner):
         self.ip = self.traits()["ip"].default_value
         self.port = self.traits()["port"].default_value
 
-        if jupyterhub.version_info >= (0, 8) and self.server:
+        if self.server:
             self.server.port = self.port
 
-        job = await self.submit_batch_script()
+        await self.submit_batch_script()
 
         # We are called with a timeout, and if the timeout expires this function will
         # be interrupted at the next yield, and self.stop() will be called.
@@ -459,23 +446,26 @@ class BatchSpawnerBase(Spawner):
                     " while pending in the queue or died immediately"
                     " after starting."
                 )
-            await gen.sleep(self.startup_poll_interval)
+            await asyncio.sleep(self.startup_poll_interval)
 
         self.ip = self.state_gethost()
         while self.port == 0:
-            await gen.sleep(self.startup_poll_interval)
+            await asyncio.sleep(self.startup_poll_interval)
             # Test framework: For testing, mock_port is set because we
             # don't actually run the single-user server yet.
             if hasattr(self, "mock_port"):
                 self.port = self.mock_port
+            # Check if job is still running
+            status = await self.poll()
+            if status:
+                raise RuntimeError(
+                    "The Jupyter batch job started"
+                    " but died before launching the single-user server."
+                )
 
-        if jupyterhub.version_info < (0, 7):
-            # store on user for pre-jupyterhub-0.7:
-            self.user.server.port = self.port
-            self.user.server.ip = self.ip
         self.db.commit()
         self.log.info(
-            "Notebook server job {0} started at {1}:{2}".format(
+            "Notebook server job {} started at {}:{}".format(
                 self.job_id, self.ip, self.port
             )
         )
@@ -496,37 +486,24 @@ class BatchSpawnerBase(Spawner):
             status = await self.query_job_status()
             if status not in (JobStatus.RUNNING, JobStatus.UNKNOWN):
                 return
-            await gen.sleep(1.0)
+            await asyncio.sleep(1)
         if self.job_id:
             self.log.warning(
-                "Notebook server job {0} at {1}:{2} possibly failed to terminate".format(
+                "Notebook server job {} at {}:{} possibly failed to terminate".format(
                     self.job_id, self.ip, self.port
                 )
             )
 
-    @async_generator
     async def progress(self):
         while True:
             if self.state_ispending():
-                await yield_(
-                    {
-                        "message": "Pending in queue...",
-                    }
-                )
+                yield {"message": "Pending in queue..."}
             elif self.state_isrunning():
-                await yield_(
-                    {
-                        "message": "Cluster job running... waiting to connect",
-                    }
-                )
+                yield {"message": "Cluster job running... waiting to connect"}
                 return
             else:
-                await yield_(
-                    {
-                        "message": "Unknown status...",
-                    }
-                )
-            await gen.sleep(1)
+                yield {"message": "Unknown status..."}
+            await asyncio.sleep(1)
 
 
 class BatchSpawnerRegexStates(BatchSpawnerBase):
@@ -673,7 +650,8 @@ set -eu
 
 class UserEnvMixin:
     """Mixin class that computes values for USER, SHELL and HOME in the environment passed to
-    the job submission subprocess in case the batch system needs these for the batch script."""
+    the job submission subprocess in case the batch system needs these for the batch script.
+    """
 
     def user_env(self, env):
         """get user environment"""
@@ -719,7 +697,6 @@ set -euo pipefail
 
 trap 'echo SIGTERM received' TERM
 {{prologue}}
-which jupyterhub-singleuser
 {% if srun %}{{srun}} {% endif %}{{cmd}}
 echo "jupyterhub-singleuser ended gracefully"
 {{epilogue}}
@@ -828,7 +805,7 @@ set -euo pipefail
     def state_ispending(self):
         if self.job_status:
             job_info = ET.fromstring(self.job_status).find(
-                ".//job_list[JB_job_number='{0}']".format(self.job_id)
+                f".//job_list[JB_job_number='{self.job_id}']"
             )
             if job_info is not None:
                 return job_info.attrib.get("state") == "pending"
@@ -837,7 +814,7 @@ set -euo pipefail
     def state_isrunning(self):
         if self.job_status:
             job_info = ET.fromstring(self.job_status).find(
-                ".//job_list[JB_job_number='{0}']".format(self.job_id)
+                f".//job_list[JB_job_number='{self.job_id}']"
             )
             if job_info is not None:
                 return job_info.attrib.get("state") == "running"
@@ -846,13 +823,13 @@ set -euo pipefail
     def state_gethost(self):
         if self.job_status:
             queue_name = ET.fromstring(self.job_status).find(
-                ".//job_list[JB_job_number='{0}']/queue_name".format(self.job_id)
+                f".//job_list[JB_job_number='{self.job_id}']/queue_name"
             )
             if queue_name is not None and queue_name.text:
                 return queue_name.text.split("@")[1]
 
         self.log.error(
-            "Spawner unable to match host addr in job {0} with status {1}".format(
+            "Spawner unable to match host addr in job {} with status {}".format(
                 self.job_id, self.job_status
             )
         )
@@ -916,12 +893,7 @@ Queue
         raise Exception(error_msg)
 
     def cmd_formatted_for_batch(self):
-        return (
-            super(CondorSpawner, self)
-            .cmd_formatted_for_batch()
-            .replace('"', '""')
-            .replace("'", "''")
-        )
+        return super().cmd_formatted_for_batch().replace('"', '""').replace("'", "''")
 
     async def move_certs(self, paths):
         """Make a copy of the SSL certificates and key JupyterHub creates for
@@ -1060,10 +1032,10 @@ set -eu
 
     def state_gethost(self):
         if self.job_status:
-            return self.job_status.split(" ")[1].strip()
+            return self.job_status.split(" ")[1].strip().split(":")[0]
 
         self.log.error(
-            "Spawner unable to match host addr in job {0} with status {1}".format(
+            "Spawner unable to match host addr in job {} with status {}".format(
                 self.job_id, self.job_status
             )
         )

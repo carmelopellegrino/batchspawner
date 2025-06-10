@@ -1,23 +1,32 @@
 """Test BatchSpawner and subclasses"""
 
+import asyncio
+import pwd
 import re
-from unittest import mock
-from .. import BatchSpawnerRegexStates, JobStatus
-from traitlets import Unicode
 import time
-import pytest
-from jupyterhub import orm, version_info
-from tornado import gen
+from getpass import getuser
+from unittest import mock
 
-try:
-    from jupyterhub.objects import Hub, Server
-    from jupyterhub.user import User
-except:
-    pass
+import pytest
+from jupyterhub import orm
+from jupyterhub.objects import Hub, Server
+from jupyterhub.user import User
+from traitlets import Unicode
+
+from .. import BatchSpawnerRegexStates, JobStatus
 
 testhost = "userhost123"
 testjob = "12345"
 testport = 54321
+
+
+@pytest.fixture(autouse=True)
+def _always_get_my_home():
+    # pwd.getbwnam() is always called with the current user
+    # ignoring the requested name, which usually doesn't exist
+    getpwnam = pwd.getpwnam
+    with mock.patch.object(pwd, "getpwnam", lambda name: getpwnam(getuser())):
+        yield
 
 
 class BatchDummy(BatchSpawnerRegexStates):
@@ -34,7 +43,7 @@ class BatchDummy(BatchSpawnerRegexStates):
     cmd_expectlist = None
     out_expectlist = None
 
-    def run_command(self, *args, **kwargs):
+    async def run_command(self, *args, **kwargs):
         """Overwriten run command to test templating and outputs"""
         cmd = args[0]
         # Test that the command matches the expectations
@@ -44,9 +53,9 @@ class BatchDummy(BatchSpawnerRegexStates):
                 print("run:", run_re)
                 assert (
                     run_re.search(cmd) is not None
-                ), "Failed test: re={0} cmd={1}".format(run_re, cmd)
+                ), f"Failed test: re={run_re} cmd={cmd}"
         # Run command normally
-        out = super().run_command(*args, **kwargs)
+        out = await super().run_command(*args, **kwargs)
         # Test that the command matches the expectations
         if self.out_expectlist:
             out_re = self.out_expectlist.pop(0)
@@ -54,75 +63,64 @@ class BatchDummy(BatchSpawnerRegexStates):
                 print("out:", out_re)
                 assert (
                     out_re.search(cmd) is not None
-                ), "Failed output: re={0} cmd={1} out={2}".format(out_re, cmd, out)
+                ), f"Failed output: re={out_re} cmd={cmd} out={out}"
         return out
 
 
 def new_spawner(db, spawner_class=BatchDummy, **kwargs):
     kwargs.setdefault("cmd", ["singleuser_command"])
     user = db.query(orm.User).first()
-    if version_info < (0, 8):
-        hub = db.query(orm.Hub).first()
-    else:
-        hub = Hub()
-        user = User(user, {})
-        server = Server()
-        # Set it after constructions because it isn't a traitlet.
+    hub = Hub()
+    user = User(user, {})
+    server = Server()
+    # Set it after constructions because it isn't a traitlet.
     kwargs.setdefault("hub", hub)
     kwargs.setdefault("user", user)
     kwargs.setdefault("poll_interval", 1)
-    if version_info < (0, 8):
-        spawner = spawner_class(db=db, **kwargs)
-        spawner.mock_port = testport
-    else:
-        print("JupyterHub >=0.8 detected, using new spawner creation")
-        # These are not traitlets so we have to set them here
-        spawner = user._new_spawner("", spawner_class=spawner_class, **kwargs)
-        spawner.server = server
-        spawner.mock_port = testport
+
+    # These are not traitlets so we have to set them here
+    spawner = user._new_spawner("", spawner_class=spawner_class, **kwargs)
+    spawner.server = server
+    spawner.mock_port = testport
     return spawner
 
 
-@pytest.mark.slow
-def test_stress_submit(db, io_loop):
-    for i in range(200):
-        time.sleep(0.01)
-        test_spawner_start_stop_poll(db, io_loop)
-
-
 def check_ip(spawner, value):
-    if version_info < (0, 7):
-        assert spawner.user.server.ip == value
-    else:
-        assert spawner.ip == value
+    assert spawner.ip == value
 
 
-def test_spawner_start_stop_poll(db, io_loop):
+async def test_spawner_start_stop_poll(db, event_loop):
     spawner = new_spawner(db=db)
 
-    status = io_loop.run_sync(spawner.poll, timeout=5)
+    status = await asyncio.wait_for(spawner.poll(), timeout=5)
     assert status == 1
     assert spawner.job_id == ""
     assert spawner.get_state() == {}
 
-    io_loop.run_sync(spawner.start, timeout=5)
+    await asyncio.wait_for(spawner.start(), timeout=5)
     check_ip(spawner, testhost)
     assert spawner.job_id == testjob
 
-    status = io_loop.run_sync(spawner.poll, timeout=5)
+    status = await asyncio.wait_for(spawner.poll(), timeout=5)
     assert status is None
     spawner.batch_query_cmd = "echo NOPE"
-    io_loop.run_sync(spawner.stop, timeout=5)
-    status = io_loop.run_sync(spawner.poll, timeout=5)
+    await asyncio.wait_for(spawner.stop(), timeout=5)
+    status = await asyncio.wait_for(spawner.poll(), timeout=5)
     assert status == 1
     assert spawner.get_state() == {}
 
 
-def test_spawner_state_reload(db, io_loop):
+async def test_stress_submit(db, event_loop):
+    for i in range(200):
+        time.sleep(0.01)
+        test_spawner_start_stop_poll(db, event_loop)
+
+
+async def test_spawner_state_reload(db, event_loop):
     spawner = new_spawner(db=db)
     assert spawner.get_state() == {}
 
-    io_loop.run_sync(spawner.start, timeout=30)
+    await asyncio.wait_for(spawner.start(), timeout=30)
     check_ip(spawner, testhost)
     assert spawner.job_id == testjob
 
@@ -137,59 +135,59 @@ def test_spawner_state_reload(db, io_loop):
     assert spawner.job_id == testjob
 
 
-def test_submit_failure(db, io_loop):
+async def test_submit_failure(db, event_loop):
     spawner = new_spawner(db=db)
     assert spawner.get_state() == {}
     spawner.batch_submit_cmd = "cat > /dev/null; true"
-    with pytest.raises(RuntimeError) as e_info:
-        io_loop.run_sync(spawner.start, timeout=30)
+    with pytest.raises(RuntimeError):
+        await asyncio.wait_for(spawner.start(), timeout=30)
     assert spawner.job_id == ""
     assert spawner.job_status == ""
 
 
-def test_submit_pending_fails(db, io_loop):
+async def test_submit_pending_fails(db, event_loop):
     """Submission works, but the batch query command immediately fails"""
     spawner = new_spawner(db=db)
     assert spawner.get_state() == {}
     spawner.batch_query_cmd = "echo xyz"
-    with pytest.raises(RuntimeError) as e_info:
-        io_loop.run_sync(spawner.start, timeout=30)
-    status = io_loop.run_sync(spawner.query_job_status, timeout=30)
+    with pytest.raises(RuntimeError):
+        await asyncio.wait_for(spawner.start(), timeout=30)
+    status = await asyncio.wait_for(spawner.query_job_status(), timeout=30)
     assert status == JobStatus.NOTFOUND
     assert spawner.job_id == ""
     assert spawner.job_status == ""
 
 
-def test_poll_fails(db, io_loop):
+async def test_poll_fails(db, event_loop):
     """Submission works, but a later .poll() fails"""
     spawner = new_spawner(db=db)
     assert spawner.get_state() == {}
     # The start is successful:
-    io_loop.run_sync(spawner.start, timeout=30)
+    await asyncio.wait_for(spawner.start(), timeout=30)
     spawner.batch_query_cmd = "echo xyz"
     # Now, the poll fails:
-    io_loop.run_sync(spawner.poll, timeout=30)
+    await asyncio.wait_for(spawner.poll(), timeout=30)
     # .poll() will run self.clear_state() if it's not found:
     assert spawner.job_id == ""
     assert spawner.job_status == ""
 
 
-def test_unknown_status(db, io_loop):
+async def test_unknown_status(db, event_loop):
     """Polling returns an unknown status"""
     spawner = new_spawner(db=db)
     assert spawner.get_state() == {}
     # The start is successful:
-    io_loop.run_sync(spawner.start, timeout=30)
+    await asyncio.wait_for(spawner.start(), timeout=30)
     spawner.batch_query_cmd = "echo UNKNOWN"
     # This poll should not fail:
-    io_loop.run_sync(spawner.poll, timeout=30)
-    status = io_loop.run_sync(spawner.query_job_status, timeout=30)
+    await asyncio.wait_for(spawner.poll(), timeout=30)
+    status = await asyncio.wait_for(spawner.query_job_status(), timeout=30)
     assert status == JobStatus.UNKNOWN
     assert spawner.job_id == "12345"
     assert spawner.job_status != ""
 
 
-def test_templates(db, io_loop):
+async def test_templates(db, event_loop):
     """Test templates in the run_command commands"""
     spawner = new_spawner(db=db)
 
@@ -197,7 +195,7 @@ def test_templates(db, io_loop):
     spawner.cmd_expectlist = [
         re.compile(".*RUN"),
     ]
-    status = io_loop.run_sync(spawner.poll, timeout=5)
+    status = await asyncio.wait_for(spawner.poll(), timeout=5)
     assert status == 1
     assert spawner.job_id == ""
     assert spawner.get_state() == {}
@@ -207,7 +205,7 @@ def test_templates(db, io_loop):
         re.compile(".*echo"),
         re.compile(".*RUN"),
     ]
-    io_loop.run_sync(spawner.start, timeout=5)
+    await asyncio.wait_for(spawner.start(), timeout=5)
     check_ip(spawner, testhost)
     assert spawner.job_id == testjob
 
@@ -215,7 +213,7 @@ def test_templates(db, io_loop):
     spawner.cmd_expectlist = [
         re.compile(".*RUN"),
     ]
-    status = io_loop.run_sync(spawner.poll, timeout=5)
+    status = await asyncio.wait_for(spawner.poll(), timeout=5)
     assert status is None
 
     # Test stopping
@@ -224,67 +222,64 @@ def test_templates(db, io_loop):
         re.compile(".*STOP"),
         re.compile(".*NOPE"),
     ]
-    io_loop.run_sync(spawner.stop, timeout=5)
-    status = io_loop.run_sync(spawner.poll, timeout=5)
+    await asyncio.wait_for(spawner.stop(), timeout=5)
+    status = await asyncio.wait_for(spawner.poll(), timeout=5)
     assert status == 1
     assert spawner.get_state() == {}
 
 
-def test_batch_script(db, io_loop):
+async def test_batch_script(db, event_loop):
     """Test that the batch script substitutes {cmd}"""
 
     class BatchDummyTestScript(BatchDummy):
-        @gen.coroutine
-        def _get_batch_script(self, **subvars):
-            script = yield super()._get_batch_script(**subvars)
+        async def _get_batch_script(self, **subvars):
+            script = await super()._get_batch_script(**subvars)
             assert "singleuser_command" in script
             return script
 
     spawner = new_spawner(db=db, spawner_class=BatchDummyTestScript)
-    # status = io_loop.run_sync(spawner.poll, timeout=5)
-    io_loop.run_sync(spawner.start, timeout=5)
-    # status = io_loop.run_sync(spawner.poll, timeout=5)
-    # io_loop.run_sync(spawner.stop, timeout=5)
+    # status = await asyncio.wait_for(spawner.poll(), timeout=5)
+    await asyncio.wait_for(spawner.start(), timeout=5)
+    # status = await asyncio.wait_for(spawner.poll(), timeout=5)
+    # await asyncio.wait_for(spawner.stop(), timeout=5)
 
 
-def test_exec_prefix(db, io_loop):
+async def test_exec_prefix(db, event_loop):
     """Test that all run_commands have exec_prefix"""
 
     class BatchDummyTestScript(BatchDummy):
         exec_prefix = "PREFIX"
 
-        @gen.coroutine
-        def run_command(self, cmd, *args, **kwargs):
+        async def run_command(self, cmd, *args, **kwargs):
             assert cmd.startswith("PREFIX ")
             cmd = cmd[7:]
             print(cmd)
-            out = yield super().run_command(cmd, *args, **kwargs)
+            out = await super().run_command(cmd, *args, **kwargs)
             return out
 
     spawner = new_spawner(db=db, spawner_class=BatchDummyTestScript)
     # Not running
-    status = io_loop.run_sync(spawner.poll, timeout=5)
+    status = await asyncio.wait_for(spawner.poll(), timeout=5)
     assert status == 1
     # Start
-    io_loop.run_sync(spawner.start, timeout=5)
+    await asyncio.wait_for(spawner.start(), timeout=5)
     assert spawner.job_id == testjob
     # Poll
-    status = io_loop.run_sync(spawner.poll, timeout=5)
+    status = await asyncio.wait_for(spawner.poll(), timeout=5)
     assert status is None
     # Stop
     spawner.batch_query_cmd = "echo NOPE"
-    io_loop.run_sync(spawner.stop, timeout=5)
-    status = io_loop.run_sync(spawner.poll, timeout=5)
+    await asyncio.wait_for(spawner.stop(), timeout=5)
+    status = await asyncio.wait_for(spawner.poll(), timeout=5)
     assert status == 1
 
 
-def run_spawner_script(
-    db, io_loop, spawner, script, batch_script_re_list=None, spawner_kwargs={}
+async def run_spawner_script(
+    db, spawner, script, batch_script_re_list=None, spawner_kwargs={}
 ):
     """Run a spawner script and test that the output and behavior is as expected.
 
     db: same as in this module
-    io_loop: same as in this module
     spawner: the BatchSpawnerBase subclass to test
     script: list of (input_re_to_match, output)
     batch_script_re_list: if given, assert batch script matches all of these
@@ -295,15 +290,14 @@ def run_spawner_script(
     out_list = list(out_list)
 
     class BatchDummyTestScript(spawner):
-        @gen.coroutine
-        def run_command(self, cmd, input=None, env=None):
+        async def run_command(self, cmd, input=None, env=None):
             # Test the input
             run_re = cmd_expectlist.pop(0)
             if run_re:
-                print('run: "{}"   [{}]'.format(cmd, run_re))
+                print(f'run: "{cmd}"   [{run_re}]')
                 assert (
                     run_re.search(cmd) is not None
-                ), "Failed test: re={0} cmd={1}".format(run_re, cmd)
+                ), f"Failed test: re={run_re} cmd={cmd}"
             # Test the stdin - will only be the batch script.  For
             # each regular expression in batch_script_re_list, assert that
             # each re in that list matches the batch script.
@@ -312,7 +306,7 @@ def run_spawner_script(
                 for match_re in batch_script_re_list:
                     assert (
                         match_re.search(batch_script) is not None
-                    ), "Batch script does not match {}".format(match_re)
+                    ), f"Batch script does not match {match_re}"
             # Return expected output.
             out = out_list.pop(0)
             print("  --> " + out)
@@ -320,25 +314,25 @@ def run_spawner_script(
 
     spawner = new_spawner(db=db, spawner_class=BatchDummyTestScript, **spawner_kwargs)
     # Not running at beginning (no command run)
-    status = io_loop.run_sync(spawner.poll, timeout=5)
+    status = await asyncio.wait_for(spawner.poll(), timeout=5)
     assert status == 1
     # batch_submit_cmd
     # batch_query_cmd    (result=pending)
     # batch_query_cmd    (result=running)
-    io_loop.run_sync(spawner.start, timeout=5)
+    await asyncio.wait_for(spawner.start(), timeout=5)
     assert spawner.job_id == testjob
     check_ip(spawner, testhost)
     # batch_query_cmd
-    status = io_loop.run_sync(spawner.poll, timeout=5)
+    status = await asyncio.wait_for(spawner.poll(), timeout=5)
     assert status is None
     # batch_cancel_cmd
-    io_loop.run_sync(spawner.stop, timeout=5)
+    await asyncio.wait_for(spawner.stop(), timeout=5)
     # batch_poll_cmd
-    status = io_loop.run_sync(spawner.poll, timeout=5)
+    status = await asyncio.wait_for(spawner.poll(), timeout=5)
     assert status == 1
 
 
-def test_torque(db, io_loop):
+async def test_torque(db, event_loop):
     spawner_kwargs = {
         "req_nprocs": "5",
         "req_memory": "5678",
@@ -355,28 +349,26 @@ def test_torque(db, io_loop):
         re.compile(r"ppn=5"),
         re.compile(r"^#PBS some_option_asdf", re.M),
     ]
+    poll_running = (
+        re.compile(r"sudo.*qstat"),
+        f"<job_state>R</job_state><exec_host>{testhost}/1</exec_host>",
+    )
     script = [
         (re.compile(r"sudo.*qsub"), str(testjob)),
         (
             re.compile(r"sudo.*qstat"),
             "<job_state>Q</job_state><exec_host></exec_host>",
         ),  # pending
-        (
-            re.compile(r"sudo.*qstat"),
-            "<job_state>R</job_state><exec_host>{}/1</exec_host>".format(testhost),
-        ),  # running
-        (
-            re.compile(r"sudo.*qstat"),
-            "<job_state>R</job_state><exec_host>{}/1</exec_host>".format(testhost),
-        ),  # running
+        poll_running,
+        poll_running,
+        poll_running,
         (re.compile(r"sudo.*qdel"), "STOP"),
         (re.compile(r"sudo.*qstat"), ""),
     ]
     from .. import TorqueSpawner
 
-    run_spawner_script(
+    await run_spawner_script(
         db,
-        io_loop,
         TorqueSpawner,
         script,
         batch_script_re_list=batch_script_re_list,
@@ -384,7 +376,7 @@ def test_torque(db, io_loop):
     )
 
 
-def test_moab(db, io_loop):
+async def test_moab(db, event_loop):
     spawner_kwargs = {
         "req_nprocs": "5",
         "req_memory": "5678",
@@ -401,25 +393,23 @@ def test_moab(db, io_loop):
         re.compile(r"ppn=5"),
         re.compile(r"^#PBS some_option_asdf", re.M),
     ]
+    poll_running = (
+        re.compile(r"sudo.*mdiag"),
+        f'State="Running" AllocNodeList="{testhost}"',
+    )
     script = [
         (re.compile(r"sudo.*msub"), str(testjob)),
         (re.compile(r"sudo.*mdiag"), 'State="Idle"'),  # pending
-        (
-            re.compile(r"sudo.*mdiag"),
-            'State="Running" AllocNodeList="{}"'.format(testhost),
-        ),  # running
-        (
-            re.compile(r"sudo.*mdiag"),
-            'State="Running" AllocNodeList="{}"'.format(testhost),
-        ),  # running
+        poll_running,
+        poll_running,
+        poll_running,
         (re.compile(r"sudo.*mjobctl.*-c"), "STOP"),
         (re.compile(r"sudo.*mdiag"), ""),
     ]
     from .. import MoabSpawner
 
-    run_spawner_script(
+    await run_spawner_script(
         db,
-        io_loop,
         MoabSpawner,
         script,
         batch_script_re_list=batch_script_re_list,
@@ -427,7 +417,7 @@ def test_moab(db, io_loop):
     )
 
 
-def test_pbs(db, io_loop):
+async def test_pbs(db, event_loop):
     spawner_kwargs = {
         "req_nprocs": "4",
         "req_memory": "10256",
@@ -444,25 +434,23 @@ def test_pbs(db, io_loop):
         re.compile(r"@some_pbs_admin_node"),
         re.compile(r"^#PBS some_option_asdf", re.M),
     ]
+    poll_running = (
+        re.compile(r"sudo.*qstat"),
+        f"job_state = R\nexec_host = {testhost}/2*1",
+    )
     script = [
         (re.compile(r"sudo.*qsub"), str(testjob)),
         (re.compile(r"sudo.*qstat"), "job_state = Q"),  # pending
-        (
-            re.compile(r"sudo.*qstat"),
-            "job_state = R\nexec_host = {}/2*1".format(testhost),
-        ),  # running
-        (
-            re.compile(r"sudo.*qstat"),
-            "job_state = R\nexec_host = {}/2*1".format(testhost),
-        ),  # running
+        poll_running,
+        poll_running,
+        poll_running,
         (re.compile(r"sudo.*qdel"), "STOP"),
         (re.compile(r"sudo.*qstat"), ""),
     ]
     from .. import PBSSpawner
 
-    run_spawner_script(
+    await run_spawner_script(
         db,
-        io_loop,
         PBSSpawner,
         script,
         batch_script_re_list=batch_script_re_list,
@@ -470,7 +458,7 @@ def test_pbs(db, io_loop):
     )
 
 
-def test_slurm(db, io_loop):
+async def test_slurm(db, event_loop):
     spawner_kwargs = {
         "req_runtime": "3-05:10:10",
         "req_nprocs": "5",
@@ -485,17 +473,16 @@ def test_slurm(db, io_loop):
         re.compile(
             r"PROLOGUE.*srun batchspawner-singleuser singleuser_command.*EPILOGUE", re.S
         ),
-        re.compile(r"^#SBATCH \s+ --cpus-per-task=5", re.X | re.M),
-        re.compile(r"^#SBATCH \s+ --time=3-05:10:10", re.X | re.M),
-        re.compile(r"^#SBATCH \s+ some_option_asdf", re.X | re.M),
-        re.compile(r"^#SBATCH \s+ --reservation=RES123", re.X | re.M),
-        re.compile(r"^#SBATCH \s+ --gres=GRES123", re.X | re.M),
+        re.compile(r"^\#SBATCH \s+ --cpus-per-task=5", re.X | re.M),
+        re.compile(r"^\#SBATCH \s+ --time=3-05:10:10", re.X | re.M),
+        re.compile(r"^\#SBATCH \s+ some_option_asdf", re.X | re.M),
+        re.compile(r"^\#SBATCH \s+ --reservation=RES123", re.X | re.M),
+        re.compile(r"^\#SBATCH \s+ --gres=GRES123", re.X | re.M),
     ]
     from .. import SlurmSpawner
 
-    run_spawner_script(
+    await run_spawner_script(
         db,
-        io_loop,
         SlurmSpawner,
         normal_slurm_script,
         batch_script_re_list=batch_script_re_list,
@@ -514,15 +501,15 @@ normal_slurm_script = [
     ),  # unknown
     (re.compile(r"sudo.*squeue"), "RUNNING " + testhost),  # running
     (re.compile(r"sudo.*squeue"), "RUNNING " + testhost),
+    (re.compile(r"sudo.*squeue"), "RUNNING " + testhost),
     (re.compile(r"sudo.*scancel"), "STOP"),
     (re.compile(r"sudo.*squeue"), ""),
 ]
 from .. import SlurmSpawner
 
 
-def run_typical_slurm_spawner(
+async def run_typical_slurm_spawner(
     db,
-    io_loop,
     spawner=SlurmSpawner,
     script=normal_slurm_script,
     batch_script_re_list=None,
@@ -533,9 +520,8 @@ def run_typical_slurm_spawner(
     This is useful, for example, for changing options and testing effect
     of batch scripts.
     """
-    return run_spawner_script(
+    return await run_spawner_script(
         db,
-        io_loop,
         spawner,
         script,
         batch_script_re_list=batch_script_re_list,
@@ -543,7 +529,7 @@ def run_typical_slurm_spawner(
     )
 
 
-# def test_gridengine(db, io_loop):
+# async def test_gridengine(db, event_loop):
 #    spawner_kwargs = {
 #        'req_options': 'some_option_asdf',
 #        }
@@ -560,12 +546,12 @@ def run_typical_slurm_spawner(
 #        (re.compile(r'sudo.*qstat'),   ''),
 #        ]
 #    from .. import GridengineSpawner
-#    run_spawner_script(db, io_loop, GridengineSpawner, script,
+#    await run_spawner_script(db, GridengineSpawner, script,
 #                       batch_script_re_list=batch_script_re_list,
 #                       spawner_kwargs=spawner_kwargs)
 
 
-def test_condor(db, io_loop):
+async def test_condor(db, event_loop):
     spawner_kwargs = {
         "req_nprocs": "5",
         "req_memory": "5678",
@@ -580,19 +566,19 @@ def test_condor(db, io_loop):
     script = [
         (
             re.compile(r"sudo.*condor_submit"),
-            "submitted to cluster {}".format(str(testjob)),
+            f"submitted to cluster {str(testjob)}",
         ),
         (re.compile(r"sudo.*condor_q"), "1,"),  # pending
-        (re.compile(r"sudo.*condor_q"), "2, @{}".format(testhost)),  # runing
-        (re.compile(r"sudo.*condor_q"), "2, @{}".format(testhost)),
+        (re.compile(r"sudo.*condor_q"), f"2, @{testhost}"),  # runing
+        (re.compile(r"sudo.*condor_q"), f"2, @{testhost}"),
+        (re.compile(r"sudo.*condor_q"), f"2, @{testhost}"),
         (re.compile(r"sudo.*condor_rm"), "STOP"),
         (re.compile(r"sudo.*condor_q"), ""),
     ]
     from .. import CondorSpawner
 
-    run_spawner_script(
+    await run_spawner_script(
         db,
-        io_loop,
         CondorSpawner,
         script,
         batch_script_re_list=batch_script_re_list,
@@ -600,7 +586,7 @@ def test_condor(db, io_loop):
     )
 
 
-def test_lfs(db, io_loop):
+async def test_lfs(db, event_loop):
     spawner_kwargs = {
         "req_nprocs": "5",
         "req_memory": "5678",
@@ -619,19 +605,19 @@ def test_lfs(db, io_loop):
     script = [
         (
             re.compile(r"sudo.*bsub"),
-            "Job <{}> is submitted to default queue <normal>".format(str(testjob)),
+            f"Job <{str(testjob)}> is submitted to default queue <normal>",
         ),
         (re.compile(r"sudo.*bjobs"), "PEND "),  # pending
-        (re.compile(r"sudo.*bjobs"), "RUN {}".format(testhost)),  # running
-        (re.compile(r"sudo.*bjobs"), "RUN {}".format(testhost)),
+        (re.compile(r"sudo.*bjobs"), f"RUN {testhost}"),  # running
+        (re.compile(r"sudo.*bjobs"), f"RUN {testhost}"),
+        (re.compile(r"sudo.*bjobs"), f"RUN {testhost}"),
         (re.compile(r"sudo.*bkill"), "STOP"),
         (re.compile(r"sudo.*bjobs"), ""),
     ]
     from .. import LsfSpawner
 
-    run_spawner_script(
+    await run_spawner_script(
         db,
-        io_loop,
         LsfSpawner,
         script,
         batch_script_re_list=batch_script_re_list,
@@ -639,7 +625,7 @@ def test_lfs(db, io_loop):
     )
 
 
-def test_keepvars(db, io_loop):
+async def test_keepvars(db, event_loop):
     # req_keepvars
     spawner_kwargs = {
         "req_keepvars": "ABCDE",
@@ -647,9 +633,8 @@ def test_keepvars(db, io_loop):
     batch_script_re_list = [
         re.compile(r"--export=ABCDE", re.X | re.M),
     ]
-    run_typical_slurm_spawner(
+    await run_typical_slurm_spawner(
         db,
-        io_loop,
         spawner_kwargs=spawner_kwargs,
         batch_script_re_list=batch_script_re_list,
     )
@@ -662,9 +647,24 @@ def test_keepvars(db, io_loop):
     batch_script_re_list = [
         re.compile(r"--export=ABCDE,XYZ", re.X | re.M),
     ]
-    run_typical_slurm_spawner(
+    await run_typical_slurm_spawner(
         db,
-        io_loop,
         spawner_kwargs=spawner_kwargs,
         batch_script_re_list=batch_script_re_list,
     )
+
+
+async def test_early_stop(db, event_loop):
+    script = [
+        (re.compile(r"sudo.*sbatch"), str(testjob)),
+        (re.compile(r"sudo.*squeue"), "PENDING "),  # pending
+        (
+            re.compile(r"sudo.*squeue"),
+            "slurm_load_jobs error: Unable to contact slurm controller",
+        ),  # unknown
+        # job exits early during start
+        (re.compile(r"sudo.*squeue"), ""),
+        (re.compile(r"sudo.*scancel"), "STOP"),
+    ]
+    with pytest.raises(RuntimeError, match="job has disappeared"):
+        await run_spawner_script(db, SlurmSpawner, script)

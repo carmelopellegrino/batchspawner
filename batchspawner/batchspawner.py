@@ -18,6 +18,7 @@ Common attributes of batch submission / resource manager environments will inclu
 import asyncio
 import os
 import pwd
+import ldap
 import re
 import sys
 
@@ -938,8 +939,34 @@ Queue
         except:
             pass
 
-        return """
+        def build_unix_groups_selector():
+            connection = ldap.initialize('ldap://ldapsrv1.cr.cnaf.infn.it')
+            res = connection.search_s('ou=group,dc=cnaf,dc=infn,dc=it', ldap.SCOPE_SUBTREE, f"memberUid={username}", ['cn'])
+
+            if len(res) == 0:
+                return "<p style='color:red; font-weight: bold;'>No valid user group found!</p><br>"
+
+            groups = [g[1]['cn'][0].decode() for g in res]
+
+            def make_item(g, idx, additional_tags=''):
+                return f"""<input type="radio" name="unix_group_{g}" {additional_tags} value="{idx}">
+<label for="unix_group_{g}">{g}</label>"""
+
+            if len(groups == 1):
+                g = groups[0]
+                return make_item(g, 1, 'disabled') + '<br>'
+
+
+            return '<br>'.join(make_item(g, idx) for idx, g in enumerate(groups, start=1))
+
+        group_selector = build_unix_groups_selector()
+
+        return f"""
         <div class="form-group">
+            <fieldset>
+            <legend>Select a group to execute the notebook as:</legend>
+            {group_selector}
+            </fieldset>
             <label for=user_config">Extra notebook configuration parameters</label>
             <textarea name="user_config" class="form-control"
                 placeholder="Content of ~/.jupyter/jupyter_notebook_config.py">{user_config}</textarea>
@@ -948,6 +975,11 @@ Queue
 
     def options_from_form(self, formdata):
         user_config = formdata.get('user_config', [''])[0]
+        unix_group = ''
+        for key in formdata.keys():
+            if key.startswith('unix_group'):
+                unix_group = key[11:]
+
         try:
             username = self.user.name
             entry = pwd.getpwnam(username)
@@ -957,8 +989,15 @@ Queue
         except:
             pass
 
-        options = {}
+        options = {'unix_group': unix_group}
         return options
+
+    async def apply_user_options(self, user_options):
+        """
+        Apply options for the spawner
+        """
+        env = super().get_env()
+        env.update(('CONDOR_SHARE', user_options['unix_group']))
 
     def get_args(self):
         """Return arguments to pass to the notebook server"""

@@ -952,7 +952,7 @@ Queue
                 return f"""<input type="radio" name="unix_group_{g}" {additional_tags} value="{idx}">
 <label for="unix_group_{g}">{g}</label>"""
 
-            if len(groups == 1):
+            if len(groups) == 1:
                 g = groups[0]
                 return make_item(g, 1, 'disabled') + '<br>'
 

@@ -992,12 +992,12 @@ Queue
         options = {'unix_group': unix_group}
         return options
 
-    async def apply_user_options(self, user_options):
+    @staticmethod
+    async def apply_user_options(spawner, user_options):
         """
         Apply options for the spawner
         """
-        env = super().get_env()
-        env.update(('CONDOR_SHARE', user_options['unix_group']))
+        spawner.environment['CONDOR_SHARE'] = user_options['unix_group']
 
     def get_args(self):
         """Return arguments to pass to the notebook server"""

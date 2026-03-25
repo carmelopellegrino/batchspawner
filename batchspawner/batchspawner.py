@@ -994,7 +994,7 @@ Queue
         """
         Apply options for the spawner
         """
-        spawner.environment['CONDOR_SHARE'] = user_options['unix_group']
+        spawner.options = f'primary_unix_group = {user_options['unix_group']}'
 
     def get_args(self):
         """Return arguments to pass to the notebook server"""

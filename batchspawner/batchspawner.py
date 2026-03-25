@@ -949,7 +949,7 @@ Queue
             groups = [g[1]['cn'][0].decode() for g in res]
 
             def make_item(g, additional_tags=''):
-                return f"""<input type="radio" id="unix_group_{g}" name="unix_group_{g}" value="{g}" {additional_tags} />
+                return f"""<input type="radio" id="unix_group_{g}" name="unix_group" value="{g}" {additional_tags} />
 <label for="unix_group_{g}">{g}</label>"""
 
             if len(groups) == 1:
@@ -975,10 +975,7 @@ Queue
 
     def options_from_form(self, formdata):
         user_config = formdata.get('user_config', [''])[0]
-        unix_group = ''
-        for key in formdata.keys():
-            if key.startswith('unix_group'):
-                unix_group = key[11:]
+        unix_group = formdata.get('unix_group', ['NONE'])[0]
 
         try:
             username = self.user.name

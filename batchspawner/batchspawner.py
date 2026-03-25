@@ -986,15 +986,8 @@ Queue
         except:
             pass
 
-        options = {'unix_group': unix_group}
+        options = {'options': f'primary_unix_group = {unix_group}'}
         return options
-
-    @staticmethod
-    async def apply_user_options(spawner, user_options):
-        """
-        Apply options for the spawner
-        """
-        spawner.options = f'primary_unix_group = {user_options['unix_group']}'
 
     def get_args(self):
         """Return arguments to pass to the notebook server"""

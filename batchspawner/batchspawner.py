@@ -949,7 +949,7 @@ Queue
             groups = [g[1]['cn'][0].decode() for g in res]
 
             def make_item(g, idx, additional_tags=''):
-                return f"""<input type="radio" name="unix_group_{g}" {additional_tags} value="{idx}">
+                return f"""<input type="radio" id="unix_group_{g} name="unix_group_{g}" {additional_tags} value="{idx}">
 <label for="unix_group_{g}">{g}</label>"""
 
             if len(groups) == 1:

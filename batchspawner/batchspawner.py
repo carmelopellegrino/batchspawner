@@ -948,16 +948,16 @@ Queue
 
             groups = [g[1]['cn'][0].decode() for g in res]
 
-            def make_item(g, idx, additional_tags=''):
-                return f"""<input type="radio" id="unix_group_{g} name="unix_group_{g}" {additional_tags} value="{idx}">
+            def make_item(g, additional_tags=''):
+                return f"""<input type="radio" id="unix_group_{g} name="unix_group_{g}" {additional_tags}>
 <label for="unix_group_{g}">{g}</label>"""
 
             if len(groups) == 1:
                 g = groups[0]
-                return make_item(g, 1, 'disabled') + '<br>'
+                return make_item(g, 'disabled') + '<br>'
 
 
-            return '<br>'.join(make_item(g, idx) for idx, g in enumerate(groups, start=1))
+            return '<br>'.join(make_item(g) for g in groups)
 
         group_selector = build_unix_groups_selector()
 

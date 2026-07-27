@@ -946,7 +946,7 @@ Queue
 
             if len(groups) == 1:
                 g = groups[0]
-                return make_item(g, 'checked disabled') + '<br>'
+                return make_item(g, 'checked') + '<br>'
 
 
             return '<br>'.join(make_item(g) for g in groups)
